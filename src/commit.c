@@ -21,6 +21,8 @@
 #include "object.h"
 #include "oidarray.h"
 
+static void format_header_field(git_buf *out, const char *field, const char *content);
+
 void git_commit__free(void *_commit)
 {
 	git_commit *commit = _commit;
@@ -37,6 +39,50 @@ void git_commit__free(void *_commit)
 	git__free(commit->body);
 
 	git__free(commit);
+}
+
+
+static int git_commit__create_buffer_internal_signature(
+	git_buf *out,
+	const git_signature *author,
+	const git_signature *committer,
+	const char *message_encoding,
+	const char *message,
+    const char *signature,
+	const git_oid *tree,
+	git_array_oid_t *parents)
+{
+	size_t i = 0;
+	const git_oid *parent;
+
+	assert(out && tree);
+
+	git_oid__writebuf(out, "tree ", tree);
+
+	for (i = 0; i < git_array_size(*parents); i++) {
+		parent = git_array_get(*parents, i);
+		git_oid__writebuf(out, "parent ", parent);
+	}
+
+	git_signature__writebuf(out, "author ", author);
+	git_signature__writebuf(out, "committer ", committer);
+
+	if (message_encoding != NULL)
+		git_buf_printf(out, "encoding %s\n", message_encoding);
+	if (signature != NULL) {
+		format_header_field(out, "gpgsig", signature);
+	}
+
+	git_buf_putc(out, '\n');
+
+	if (git_buf_puts(out, message) < 0)
+		goto on_error;
+
+	return 0;
+
+on_error:
+	git_buf_free(out);
+	return -1;
 }
 
 static int git_commit__create_buffer_internal(
@@ -117,6 +163,121 @@ on_error:
 	return error;
 }
 
+int git_commit_create_buffer_for_signature(
+	git_buf* out,
+	git_oid *id,
+	git_repository *repo,
+	const char *update_ref,
+	const git_signature *author,
+	const git_signature *committer,
+	const char *message_encoding,
+	const char *message,
+	const git_oid *tree,
+	git_commit_parent_callback parent_cb,
+	void *parent_payload,
+	bool validate)
+{
+	int error;
+	git_reference *ref = NULL;
+	git_buf buf = GIT_BUF_INIT;
+	const git_oid *current_id = NULL;
+	git_array_oid_t parents = GIT_ARRAY_INIT;
+	
+	if (update_ref) {
+		error = git_reference_lookup_resolved(&ref, repo, update_ref, 10);
+		if (error < 0 && error != GIT_ENOTFOUND)
+			return error;
+	}
+	giterr_clear();
+	
+	if (ref)
+		current_id = git_reference_target(ref);
+	
+	if ((error = validate_tree_and_parents(&parents, repo, tree, parent_cb, parent_payload, current_id, validate)) < 0)
+		goto cleanup;
+	
+	error = git_commit__create_buffer_internal(&buf, author, committer,
+											   message_encoding, message, tree,
+											   &parents);
+	
+	
+	if (error < 0)
+		goto cleanup;
+	git_buf_sets(out, git_buf_cstr(&buf));
+	
+cleanup:
+	git_array_clear(parents);
+	git_reference_free(ref);
+	git_buf_free(&buf);
+	return error;
+}
+
+static int git_commit_with_signature__create_internal(
+	git_oid *id,
+	git_repository *repo,
+	const char *update_ref,
+	const git_signature *author,
+	const git_signature *committer,
+	const char *message_encoding,
+	const char *message,
+    const char *signatureString,
+	const git_oid *tree,
+	git_commit_parent_callback parent_cb,
+	void *parent_payload,
+	bool validate)
+{
+	int error;
+	git_odb *odb;
+	git_reference *ref = NULL;
+	git_buf buf = GIT_BUF_INIT;
+	const git_oid *current_id = NULL;
+	git_array_oid_t parents = GIT_ARRAY_INIT;
+	
+	if (update_ref) {
+		error = git_reference_lookup_resolved(&ref, repo, update_ref, 10);
+		if (error < 0 && error != GIT_ENOTFOUND)
+			return error;
+	}
+	giterr_clear();
+	
+	if (ref)
+		current_id = git_reference_target(ref);
+	
+	if ((error = validate_tree_and_parents(&parents, repo, tree, parent_cb, parent_payload, current_id, validate)) < 0)
+		goto cleanup;
+	
+	error = git_commit__create_buffer_internal_signature(&buf, author, committer,
+											   message_encoding, message, signatureString, tree,
+											   &parents);
+	
+	if (error < 0)
+		goto cleanup;
+	
+//	format_header_field(&buf, "gpgsig", signatureString);
+	
+	if (git_repository_odb__weakptr(&odb, repo) < 0)
+		goto cleanup;
+	
+	if (git_odb__freshen(odb, tree) < 0)
+		goto cleanup;
+	
+	if (git_odb_write(id, odb, buf.ptr, buf.size, GIT_OBJ_COMMIT) < 0)
+		goto cleanup;
+	
+	
+	if (update_ref != NULL) {
+		error = git_reference__update_for_commit(
+												 repo, ref, update_ref, id, "commit");
+		goto cleanup;
+	}
+	
+cleanup:
+	git_array_clear(parents);
+	git_reference_free(ref);
+	git_buf_free(&buf);
+	return error;
+}
+
 static int git_commit__create_internal(
 	git_oid *id,
 	git_repository *repo,
@@ -194,6 +355,25 @@ int git_commit_create_from_callback(
 {
 	return git_commit__create_internal(
 		id, repo, update_ref, author, committer, message_encoding, message,
+		tree, parent_cb, parent_payload, true);
+}
+
+int git_commit_create_with_signature_from_callback(
+    git_oid *id,
+    git_repository *repo,
+    const char *update_ref,
+    const git_signature *author,
+    const git_signature *committer,
+    const char *message_encoding,
+    const char *message,
+    const char *signatureString,
+    const git_oid *tree,
+    git_commit_parent_callback parent_cb,
+    void *parent_payload)
+{
+	return git_commit_with_signature__create_internal(
+		id, repo, update_ref, author, committer,
+		message_encoding, message, signatureString,
 		tree, parent_cb, parent_payload, true);
 }
 

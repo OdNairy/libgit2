@@ -75,6 +75,47 @@ GIT_EXTERN(int) git_commit_create_from_callback(
 	git_commit_parent_callback parent_cb,
 	void *parent_payload);
 
+/**
+ * Create a new commit in the repository with an callback to supply parents and signature.
+ *
+ * See documentation for `git_commit_create()` and `git_commit_create_with_signature()` for information about the
+ * parameters, as the meaning is identical excepting that `tree` takes a
+ * `git_oid` and doesn't check for validity, and `parent_cb` is invoked
+ * with `parent_payload` and should return `git_oid` values or NULL to
+ * indicate that all parents are accounted for.
+ *
+ * @see git_commit_create
+ * @see git_commit_create_with_signature
+ */
+GIT_EXTERN(int) git_commit_create_with_signature_from_callback(
+    git_oid *id,
+    git_repository *repo,
+    const char *update_ref,
+    const git_signature *author,
+    const git_signature *committer,
+    const char *message_encoding,
+    const char *message,
+    const char *signatureString,
+    const git_oid *tree,
+    git_commit_parent_callback parent_cb,
+    void *parent_payload);
+
+
+GIT_EXTERN(int) git_commit_create_buffer_for_signature(
+                                                  git_buf* out,
+                                                  git_oid *id,
+                                                  git_repository *repo,
+                                                  const char *update_ref,
+                                                  const git_signature *author,
+                                                  const git_signature *committer,
+                                                  const char *message_encoding,
+                                                  const char *message,
+                                                  const git_oid *tree,
+                                                  git_commit_parent_callback parent_cb,
+                                                  void *parent_payload,
+                                                              bool validate);
+
+
 /** @} */
 GIT_END_DECL
 #endif
